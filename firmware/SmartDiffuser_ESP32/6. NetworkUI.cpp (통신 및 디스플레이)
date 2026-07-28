@@ -42,6 +42,8 @@ static const unsigned long LOCAL_SETTINGS_PROTECT_MS = 30000;
 
 static String pendingManualScent = "";
 static unsigned long lastScentTouchTime = 0;
+static unsigned long manualModeOffMillis = 0;
+static int lastStoppedManualScent = 0;
 
 struct EncodedRegionText {
   const char *utf8;
@@ -555,11 +557,14 @@ String buildWeatherRequestPayload(const String &region) {
   return payload;
 }
 
-static String buildDisplayModePayload(const String &activeMode) {
+static String buildDisplayModePayload(const String &activeMode, int activeScent = 0) {
   JsonDocument reqDoc;
   reqDoc["action"] = "DISPLAY_MODE";
   reqDoc["mode"] = "display";
   reqDoc["active_mode"] = activeMode;
+  if (activeScent > 0) {
+    reqDoc["active_scent"] = activeScent;
+  }
 
   String payload;
   payload.reserve(96);
@@ -567,9 +572,9 @@ static String buildDisplayModePayload(const String &activeMode) {
   return payload;
 }
 
-static void syncDisplayModeToServer(const String &activeMode) {
+static void syncDisplayModeToServer(const String &activeMode, int activeScent = 0) {
   if (WiFi.status() != WL_CONNECTED) return;
-  sendServerRequest(buildDisplayModePayload(activeMode));
+  sendServerRequest(buildDisplayModePayload(activeMode, activeScent));
 }
 
 static String attachDeviceIdIfMissing(const String &payload) {
@@ -707,6 +712,7 @@ static void handleScentButton(const String &cmd) {
   if (!blendModeEnabled) {
     lastManualPage = PAGE_MANUAL_SCENT_BASE + scent;
     showPage(lastManualPage);
+    syncDisplayModeToServer("manual", scent);
     pendingManualScent = String(scent);
     lastScentTouchTime = millis();
     return;
@@ -724,6 +730,7 @@ static void handleScentButton(const String &cmd) {
   } else if (blendSelection.length() == 2) {
     lastManualPage = blendPairPage(blendSelection);
     showPage(lastManualPage);
+    syncDisplayModeToServer("manual", blendSelection.toInt());
     
     pendingManualScent = blendSelection;
     lastScentTouchTime = millis();
@@ -907,6 +914,9 @@ void handleNextionCmd(const String &cmd) {
       syncDisplayModeToServer("ready");
       showPage(PAGE_WEATHER_OFF);
     } else if (modeBeforeStop == MODE_MANUAL) {
+      lastStoppedManualScent = isManualScentPage(currentDisplayPage) ? (currentDisplayPage - PAGE_MANUAL_SCENT_BASE) : 0;
+      manualModeOffMillis = millis();
+      syncDisplayModeToServer("ready");
       showPage(PAGE_MANUAL);
     } else {
       showPage(PAGE_MODE_SELECT);
@@ -1294,6 +1304,7 @@ static void processServerResponse(const String& response) {
   // 4. 분사 제어 명령 처리
   String serverActiveMode = doc["active_mode"] | "";
   serverActiveMode.trim();
+  static int lastSyncedManualScent = 0;
   if (serverActiveMode == "weather") {
     bool wasWeatherMode = currentMode == MODE_WEATHER;
     if (!wasWeatherMode) {
@@ -1301,13 +1312,44 @@ static void processServerResponse(const String& response) {
       showWeatherPageByState();
       lastWeatherCallMillis = millis();
       sendServerRequest(buildWeatherRequestPayload(lastWeatherRegion));
-    } else if (currentDisplayPage != PAGE_WEATHER) {
-      showWeatherPageByState();
     }
-  } else if ((serverActiveMode == "ready" || serverActiveMode == "off") && currentMode == MODE_WEATHER) {
-    clearWeatherState();
-    setSystemMode(MODE_READY, "Weather Mode Off");
-    showPage(PAGE_WEATHER_OFF);
+  } else if (serverActiveMode == "ready" || serverActiveMode == "off") {
+    if (currentMode == MODE_WEATHER) {
+      clearWeatherState();
+      setSystemMode(MODE_READY, "Weather Mode Off");
+      showPage(PAGE_WEATHER_OFF);
+    } else if (currentMode == MODE_MANUAL) {
+      setSystemMode(MODE_READY, "Manual Mode Off");
+      lastManualPage = PAGE_MANUAL;
+    }
+    lastSyncedManualScent = 0;
+    manualModeOffMillis = 0;
+    lastStoppedManualScent = 0;
+  } else if (serverActiveMode == "manual") {
+    int activeScent = doc["active_scent"] | 0;
+    if (activeScent <= 0) {
+      activeScent = doc["spray"] | 0;
+    }
+    int firstScent = activeScent;
+    while (firstScent > 9) {
+      firstScent /= 10;
+    }
+
+    if (firstScent >= 1 && firstScent <= 4) {
+      if (lastStoppedManualScent == activeScent && millis() - manualModeOffMillis < 5000) {
+        return;
+      }
+      bool scentChanged = activeScent != lastSyncedManualScent;
+      lastSyncedManualScent = activeScent;
+      lastManualPage = PAGE_MANUAL_SCENT_BASE + firstScent;
+      if (currentMode != MODE_MANUAL || scentChanged) {
+        setSystemMode(MODE_MANUAL, "Manual Mode");
+        showPage(lastManualPage);
+      }
+    } else if (currentMode != MODE_MANUAL) {
+      setSystemMode(MODE_MANUAL, "Manual Mode");
+      showManualPageByState();
+    }
   }
 
   int cmd = doc["spray"] | -1;
