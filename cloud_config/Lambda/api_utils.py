@@ -113,6 +113,77 @@ def ask_gemini_recommendation(diary_text, user_history_text, slot_info_str="1번
             logger.error(f"[Gemini API 일반 에러] {e}")
             return "0", f"AI 분석 실패: {e}", {"led_r": -1, "led_g": -1, "led_b": -1, "led_bright": -1}, "AI 분석 실패", "에러"
 
+def ask_gemini_ambient_mood(db_avg, db_1hr_avg, is_spike, db_stddev):
+    """
+    소음 모드(Ambient Mode)에서 15분 쿨타임 만료 시 또는 Spike 발생 시 호출되어,
+    현재 소음 환경에 어울리는 조명(LED)과 배경음악(Music)을 추천합니다.
+    """
+    api_key = getattr(config, "GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        logger.error("Gemini API 키가 없습니다.")
+        return 0, {"led_r": -1, "led_g": -1, "led_b": -1, "led_bright": -1}
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+
+    prompt = f"""
+    현재 매장/공간의 소음 데이터를 분석하여 가장 어울리는 분위기의 조명과 음악 트랙 번호를 추천해줘.
+    
+    [소음 환경 데이터]
+    - 현재 평균 소음: {db_avg}dB
+    - 1시간 평균 소음: {db_1hr_avg}dB
+    - 소음 변동성(표준편차): {db_stddev}
+    - 급격한 소음 변화(Spike) 발생 여부: {is_spike}
+
+    [조건]
+    1. 'music' 필드에 1부터 25 사이의 숫자로 배경 음악 트랙 번호를 추천해줘. 
+       - 소음이 적고 안정적이면 잔잔한 음악(낮은 번호대), 소음이 크거나 변화가 크면 활기찬 음악(높은 번호대) 추천.
+    2. 'led_r', 'led_g', 'led_b' 필드에 0~255 사이의 RGB 조명 색상을 추천해줘.
+       - 시끄러운 환경이면 차분한 색상(파란색, 보라색 계열) 또는 역동적인 색상(빨간색, 주황색).
+       - 조용한 환경이면 따뜻한 색상(노란색, 초록색).
+       - 조명은 파스텔톤을 피하고 가장 큰 값은 255에 가깝게 원색 위주로 설정해줘.
+    3. 'led_bright' 필드에 0~255 사이의 밝기를 추천해줘. (기본적으로 100~255 사이)
+
+    반드시 아래와 같은 순수 JSON 형태로만 대답해:
+    {{"music": 6, "led_r": 255, "led_g": 180, "led_b": 0, "led_bright": 150}}
+    """
+
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}]
+    }).encode('utf-8')
+
+    max_retries = 2
+    for attempt in range(max_retries):
+        req = urllib.request.Request(url, data=payload, method='POST')
+        req.add_header('Content-Type', 'application/json')
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                response_data = json.loads(res.read().decode('utf-8'))
+                
+                text_result = response_data['candidates'][0]['content']['parts'][0]['text']
+                clean_text = text_result.replace("```json", "").replace("```", "").strip()
+                result_json = json.loads(clean_text)
+                
+                music_code = int(result_json.get("music", 0))
+                led_dict = {
+                    "led_r": int(result_json.get("led_r", -1)),
+                    "led_g": int(result_json.get("led_g", -1)),
+                    "led_b": int(result_json.get("led_b", -1)),
+                    "led_bright": int(result_json.get("led_bright", -1))
+                }
+                
+                logger.info(f"[Gemini Ambient Mood] Music: {music_code}, LED: {led_dict}")
+                return music_code, led_dict
+
+        except Exception as e:
+            logger.error(f"[Gemini Ambient API 에러] {e}")
+            if attempt < max_retries - 1:
+                import time
+                time.sleep(1)
+                continue
+            return 0, {"led_r": -1, "led_g": -1, "led_b": -1, "led_bright": -1}
+
+
 def get_kma_time():
     """
     get_kma_time 함수: 해당 역할을 수행함.
