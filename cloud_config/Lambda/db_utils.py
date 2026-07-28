@@ -1,5 +1,5 @@
 
-DynamoDB 등 데이터베이스와의 통신 및 쿼리를 담당하는 유틸리티 모듈
+# DynamoDB 등 데이터베이스와의 통신 및 쿼리를 담당하는 유틸리티 모듈
 
 
 import boto3
@@ -186,7 +186,7 @@ def _build_ambient_seed_update():
     _build_ambient_seed_update 함수: 해당 역할을 수행함.
     """
     assignments = [
-        f"scent_{scent_id}_score = if_not_exists(scent_{scent_id}_score, :zero)"
+        f"scent_{scent_id}_score = if_not_exists(scent_{scent_id}_score, :def_weight)"
         for scent_id in _ambient_scent_ids()
     ]
     return "SET " + ", ".join(assignments)
@@ -198,7 +198,7 @@ def _read_ambient_scores(item):
     """
     scores = {}
     for scent_id in _ambient_scent_ids():
-        scores[scent_id] = int(item.get(f"scent_{scent_id}_score", 0))
+        scores[scent_id] = int(item.get(f"scent_{scent_id}_score", 50))
     return scores
 
 
@@ -224,7 +224,7 @@ def ensure_ambient_context(context_key):
     ambient_table.update_item(
         Key={"context_key": normalized_key},
         UpdateExpression=_build_ambient_seed_update(),
-        ExpressionAttributeValues={":zero": 0},
+        ExpressionAttributeValues={":def_weight": 50},
     )
     return True
 
@@ -245,7 +245,7 @@ def seed_ambient_defaults():
 
 def get_ambient_recommendation(context_key, device_id):
     """
-    get_ambient_recommendation 함수: 해당 역할을 수행함.
+    get_ambient_recommendation 함수: 1-9-90 룰렛 알고리즘 (Softmax/Ratio) 적용
     """
     try:
         ensure_ambient_context(context_key)
@@ -258,26 +258,28 @@ def get_ambient_recommendation(context_key, device_id):
         if not installed_kinds:
             installed_kinds = set(_default_spray_to_kind().values())
 
-        sorted_kinds = sorted(scores.keys(), key=lambda k: (-scores[k], k))
+        # 장착된 향기만 필터링하여 최소 가중치 1 보장
+        valid_scores = {k: max(1, scores.get(k, 50)) for k in installed_kinds}
+        kinds = list(valid_scores.keys())
+        weights = list(valid_scores.values())
         
-        best_kind = int(getattr(config, "AMBIENT_DEFAULT_SCENT", 1))
-        
-        for kind in sorted_kinds:
-            if kind in installed_kinds:
-                best_kind = kind
-                break
+        if not kinds:
+            return int(getattr(config, "AMBIENT_DEFAULT_SCENT", 1)), scores
+            
+        # 룰렛(비율 배분) 돌리기
+        best_kind = random.choices(kinds, weights=weights, k=1)[0]
 
         return best_kind, scores
     except Exception as e:
         logger.error(f"Ambient Recommendation Error: {e}")
         return int(getattr(config, "AMBIENT_DEFAULT_SCENT", 1)), {
-            kind_id: 0 for kind_id in _ambient_scent_ids()
+            kind_id: 50 for kind_id in _ambient_scent_ids()
         }
 
 
 def save_ambient_feedback(context_key, scent_code, weight_change):
     """
-    save_ambient_feedback 함수: 해당 역할을 수행함.
+    save_ambient_feedback 함수: 앱의 좋아요/별로예요 피드백 반영, 하한선 1 유지
     """
     try:
         normalized_key = str(context_key or "").strip()
@@ -286,11 +288,20 @@ def save_ambient_feedback(context_key, scent_code, weight_change):
             return False
 
         ensure_ambient_context(normalized_key)
+        
+        resp = ambient_table.get_item(Key={"context_key": normalized_key})
+        item = resp.get("Item") or {}
+        
         score_col = f"scent_{scent_no}_score"
+        current_score = int(item.get(score_col, 50))
+        
+        new_score = current_score + int(weight_change)
+        new_score = max(1, min(100, new_score))
+        
         ambient_table.update_item(
             Key={"context_key": normalized_key},
-            UpdateExpression=f"ADD {score_col} :val",
-            ExpressionAttributeValues={":val": int(weight_change)},
+            UpdateExpression=f"SET {score_col} = :val",
+            ExpressionAttributeValues={":val": new_score},
         )
         return True
     except Exception as e:
@@ -509,7 +520,9 @@ def get_music_track(device_id, spray_or_kind_code, is_pump=False):
         if "Item" in res and "music_tracks" in res["Item"]:
             track_list = str(res["Item"]["music_tracks"]).split("_")
             if spray_no is not None and 1 <= int(spray_no) <= 4 and len(track_list) == 4:
-                return int(track_list[int(spray_no) - 1])
+                raw_track = track_list[int(spray_no) - 1]
+                first_track = raw_track.split(",")[0].strip()
+                return int(first_track)
     except Exception as e:
         logger.error(f"Music Load Error: {e}")
 
