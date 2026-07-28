@@ -1,6 +1,7 @@
 
 #사용자 인증, 로그인, 회원가입 관련 로직을 처리하는 람다 핸들러
 
+
 import json
 import random
 import logging
