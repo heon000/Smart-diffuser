@@ -1249,7 +1249,6 @@ static void processServerResponse(const String& response) {
     scaledVol = constrain(scaledVol, 0, 30);
     if (scaledVol != currentVolume) {
       changeVolume(scaledVol);
-      // 서버 명령으로 변경된 경우, 디스플레이 화면도 해당 음량 페이지로 즉시 전환
       showPage(VOLUME_PAGE_BASE + (scaledVol / 3));
     }
   }
@@ -1300,6 +1299,8 @@ static void processServerResponse(const String& response) {
     if (!wasWeatherMode) {
       setSystemMode(MODE_WEATHER, "Weather Mode");
       showWeatherPageByState();
+      lastWeatherCallMillis = millis();
+      sendServerRequest(buildWeatherRequestPayload(lastWeatherRegion));
     } else if (currentDisplayPage != PAGE_WEATHER) {
       showWeatherPageByState();
     }
@@ -1323,11 +1324,13 @@ static void processServerResponse(const String& response) {
     setSystemMode(MODE_READY, "Stopped by Server");
     showPage(PAGE_WEATHER_OFF);
   } else if (cmd > 0) {
-    int dur = doc["duration"] | 3; 
-    int music = doc["music"] | 0; 
+    int dur = doc["duration"] | 3;
+    int music = doc["music"] | 0;
     String txt = resultText.length() > 0 ? resultText : "명령 수신";
     triggerSpray(cmd, dur, music, txt, (currentMode == MODE_WEATHER));
-  } else if (cmd == 0 && resultText != "OK") {
+  }
+  // ★ [핵심 수정] 서버에서 명확하게 STOP 또는 OFF 명령이 내려왔을 때만 정지하도록 보강!
+  else if (cmd == 0 && (resultText == "STOP" || resultText == "OFF")) {
     SystemMode modeBeforeStop = currentMode;
     setSystemMode(MODE_READY, "Stopped by Server");
     if (modeBeforeStop == MODE_WEATHER) {
@@ -1343,7 +1346,7 @@ static void processServerResponse(const String& response) {
   }
   else if (!doc["music"].isNull()) {
     int track = doc["music"] | 0;
-    if (track > 0 && track <= 25) {
+    if (track > 0) {
       playSound(track);
       nexSend("t_music.txt=\"" + getTrackName(track) + "\"");
       updateDisplay(0, "Music Playing");
