@@ -555,6 +555,23 @@ String buildWeatherRequestPayload(const String &region) {
   return payload;
 }
 
+static String buildDisplayModePayload(const String &activeMode) {
+  JsonDocument reqDoc;
+  reqDoc["action"] = "DISPLAY_MODE";
+  reqDoc["mode"] = "display";
+  reqDoc["active_mode"] = activeMode;
+
+  String payload;
+  payload.reserve(96);
+  serializeJson(reqDoc, payload);
+  return payload;
+}
+
+static void syncDisplayModeToServer(const String &activeMode) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  sendServerRequest(buildDisplayModePayload(activeMode));
+}
+
 static String attachDeviceIdIfMissing(const String &payload) {
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, payload);
@@ -860,6 +877,7 @@ void handleNextionCmd(const String &cmd) {
       showPage(PAGE_WEATHER);
       beginWeatherRefresh();
       enterWeatherMode(true);
+      syncDisplayModeToServer("weather");
     }
   } 
   else if (cmd == "M1" || cmd == "Y1") {
@@ -886,6 +904,7 @@ void handleNextionCmd(const String &cmd) {
       hasTempHumiSnapshot = false;
       lastWeatherLabel = "";
       lastWeatherIconId = 0;
+      syncDisplayModeToServer("ready");
       showPage(PAGE_WEATHER_OFF);
     } else if (modeBeforeStop == MODE_MANUAL) {
       showPage(PAGE_MANUAL);
@@ -1242,11 +1261,13 @@ static void processServerResponse(const String& response) {
     targetRegion = doc["region"] | "";
   }
   bool hadSavedRegion = lastWeatherRegion.length() > 0;
+  bool deferWeatherActionForRegionSync = false;
 
   if (targetRegion.length() > 0) {
     rememberWeatherRegion(targetRegion);
     if (currentMode == MODE_WEATHER && !hadSavedRegion) {
       lastWeatherCallMillis = millis();
+      deferWeatherActionForRegionSync = true;
       sendServerRequest(buildWeatherRequestPayload(lastWeatherRegion));
     }
   }
@@ -1272,6 +1293,22 @@ static void processServerResponse(const String& response) {
   }
 
   // 4. 분사 제어 명령 처리
+  String serverActiveMode = doc["active_mode"] | "";
+  serverActiveMode.trim();
+  if (serverActiveMode == "weather") {
+    bool wasWeatherMode = currentMode == MODE_WEATHER;
+    if (!wasWeatherMode) {
+      setSystemMode(MODE_WEATHER, "Weather Mode");
+      showWeatherPageByState();
+    } else if (currentDisplayPage != PAGE_WEATHER) {
+      showWeatherPageByState();
+    }
+  } else if ((serverActiveMode == "ready" || serverActiveMode == "off") && currentMode == MODE_WEATHER) {
+    clearWeatherState();
+    setSystemMode(MODE_READY, "Weather Mode Off");
+    showPage(PAGE_WEATHER_OFF);
+  }
+
   int cmd = doc["spray"] | -1;
   String resultText = doc["result_text"] | "";
   
@@ -1279,7 +1316,13 @@ static void processServerResponse(const String& response) {
     updateMusicMapping(doc["music_tracks"] | "");
   }
 
-  if (cmd > 0) {
+  if (deferWeatherActionForRegionSync) {
+    Serial.println(C_YELLOW "\r\n[Weather] Region synced; skipping this bootstrap spray/music response.\r\n" C_RESET);
+  } else if (cmd == 90) {
+    clearWeatherState();
+    setSystemMode(MODE_READY, "Stopped by Server");
+    showPage(PAGE_WEATHER_OFF);
+  } else if (cmd > 0) {
     int dur = doc["duration"] | 3; 
     int music = doc["music"] | 0; 
     String txt = resultText.length() > 0 ? resultText : "명령 수신";
